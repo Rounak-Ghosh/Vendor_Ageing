@@ -1,0 +1,23 @@
+*&---------------------------------------------------------------------*
+*& Include          Z_VENDOR_AGEING_SEL_SCRN
+*&---------------------------------------------------------------------*
+
+  SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
+    SELECT-OPTIONS: s_bukrs FOR t001-bukrs OBLIGATORY DEFAULT 'R001' NO INTERVALS.
+    SELECT-OPTIONS: s_sgment FOR acdoca-segment.
+    SELECT-OPTIONS: s_lifnr FOR lfa1-lifnr.
+    PARAMETERS: s_budat LIKE sy-datum DEFAULT sy-datum OBLIGATORY.
+    SELECT-OPTIONS: s_land1 FOR lfa1-land1 NO-DISPLAY DEFAULT 'IN' .
+    SELECT-OPTIONS: s_regio FOR lfa1-regio NO-DISPLAY.
+    SELECT-OPTIONS: s_ort01 FOR lfa1-ort01 NO-DISPLAY NO INTERVALS.
+    SELECT-OPTIONS: s_saknr FOR lfb1-akont NO-DISPLAY.
+  SELECTION-SCREEN END OF BLOCK b1.
+
+  SELECTION-SCREEN : BEGIN OF BLOCK b2.
+    PARAMETERS : rb_smry RADIOBUTTON GROUP rb.
+    PARAMETERS : rb_inv RADIOBUTTON GROUP rb.
+    PARAMETERS : rb_comp RADIOBUTTON GROUP rb.
+*  PARAMETERS : rb_ptdtls RADIOBUTTON GROUP rb.
+*  PARAMETERS : rb_ptpro RADIOBUTTON GROUP rb.
+*  PARAMETERS : rb_openitems RADIOBUTTON GROUP rb.
+  SELECTION-SCREEN : END OF BLOCK b2.

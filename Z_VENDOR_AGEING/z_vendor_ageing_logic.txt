@@ -1,0 +1,907 @@
+*&---------------------------------------------------------------------*
+*& Include          Z_VENDOR_AGEING_LOGIC
+*&---------------------------------------------------------------------*
+
+***** Fetch all the vendors
+PERFORM get_vendors.
+
+***** Fetch all the open items for all vendors
+PERFORM get_open_items.
+
+***** Adjustment of credit & debit balances
+PERFORM balancing_credit_debit.
+
+***** Display final table in ALV for invoice list option
+IF rb_inv EQ 'X'.
+  PERFORM display_alv_invoice.
+ENDIF.
+
+***** Modify & Display final table in ALV for summary option
+IF rb_smry EQ 'X'.
+  PERFORM modify_final_summary.
+  PERFORM display_alv_summary.
+ENDIF.
+
+***** Modify & Display final table in ALV for company act option
+IF rb_comp EQ 'X'.
+  PERFORM modify_final_compact.
+  PERFORM display_alv_compact.
+ENDIF.
+
+
+
+*&---------------------------------------------------------------------*
+*& Form get_vendors
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM get_vendors .
+
+  IF s_lifnr IS NOT INITIAL.
+    SELECT *
+      FROM lfa1
+      INTO CORRESPONDING FIELDS OF TABLE it_lfa1
+      WHERE lifnr IN s_lifnr.
+  ELSE.
+    SELECT *
+      FROM lfa1
+      INTO CORRESPONDING FIELDS OF TABLE it_lfa1.
+  ENDIF.
+
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*& Form get_open_items
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM get_open_items .
+
+  DESCRIBE TABLE it_lfa1 LINES no_of_vendors.
+
+  LOOP AT it_lfa1 INTO wa_lfa1.
+
+    progress_perc = ( sy-tabix / no_of_vendors ) * 100.
+    progress_perc = progress_perc+0(4).
+    CONCATENATE progress_perc '% -> Fetching invoices for ' wa_lfa1-name1 ' ....' INTO progress_text RESPECTING BLANKS.
+    CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+      EXPORTING
+        percentage = progress_perc
+        text       = progress_text.
+
+    PERFORM submit_program.
+    PERFORM execute_validations.
+    PERFORM final_table.
+  ENDLOOP.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*& Form submit_program
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM submit_program .
+
+***** Submit program of FBL1N
+  CLEAR it_pos[].
+  SUBMIT zfbl1n
+          WITH kd_bukrs IN s_bukrs
+          WITH kd_lifnr EQ wa_lfa1-lifnr
+          WITH kd_noaut EQ 'X'
+          WITH kd_nooap EQ 'X'
+          WITH kd_objec EQ 'FI_DOCUMNT'
+          WITH kd_opopt EQ 'X'
+          WITH kd_stida EQ s_budat
+          WITH kd_usedb EQ 'X'
+          WITH kd_iarch EQ 'X'
+          WITH kd_memor EQ 'X'
+          WITH pa_stida EQ s_budat
+*          WITH pa_vari EQ '/KOLKATA'
+          WITH x_norm EQ 'X'
+          WITH x_opsel EQ 'X'
+          WITH x_shbv EQ 'X'
+          AND RETURN.
+
+  IMPORT it_pos = it_pos FROM MEMORY ID 'ZFBL1N'.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*& Form execute_validations
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM execute_validations .
+
+***** Validations in output table of FBL1N
+  DELETE it_pos WHERE bupla NOT IN s_sgment.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*& Form final_table
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM final_table .
+
+***** Fetching zterm from standard table incase not maintained with Invoice
+  SELECT SINGLE zterm
+    FROM lfb1
+    INTO @DATA(zterm)
+  WHERE lifnr = @wa_lfa1-lifnr
+  AND bukrs = @s_bukrs-low.
+
+  CLEAR wa_final.
+
+***** Populating it_final table from it_pos return table
+  LOOP AT it_pos INTO wa_pos.
+    CONCATENATE wa_lfa1-lifnr wa_pos-bupla INTO wa_final-combo.
+    wa_final-segment = wa_pos-bupla.
+    wa_final-gsber   = wa_pos-gsber.
+    wa_final-lifnr   = wa_lfa1-lifnr.
+    wa_final-name1   = wa_lfa1-name1.
+    wa_final-ind     = wa_pos-shkzg.
+    wa_final-saknr   = wa_pos-hkont.
+    wa_final-belnr   = wa_pos-belnr.
+    wa_final-belnl   = wa_pos-xblnr.
+    wa_final-accdt   = wa_pos-budat.
+    wa_final-bldat   = wa_pos-bldat.
+    wa_final-budat   = wa_pos-budat.
+    wa_final-dmbtr   = wa_pos-dmshb.
+    wa_final-blart   = wa_pos-blart.
+    wa_final-gjahr   = wa_pos-gjahr.
+    wa_final-zterm   = zterm.
+
+**** Due date calculation logic
+    PERFORM due_date_calculation.
+
+    APPEND wa_final TO it_final.
+    CLEAR wa_final.
+  ENDLOOP.
+
+  SORT it_final BY combo.
+
+**** Delete it_final where total sum is equal to zero
+  CLEAR lv_sum_dmbtr.
+  LOOP AT it_final INTO wa_final.
+    lv_sum_dmbtr += wa_final-dmbtr.
+  ENDLOOP.
+  IF lv_sum_dmbtr EQ 0.
+    REFRESH it_final[].
+  ENDIF.
+  CLEAR lv_sum_dmbtr.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*& Form due_date_calculation
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM due_date_calculation .
+
+  SELECT SINGLE text1
+    FROM t052u
+    INTO wa_final-text1
+    WHERE zterm = wa_final-zterm.
+
+  SELECT SINGLE calcu
+    FROM zpaymt_terms
+    INTO wa_final-ekorg
+    WHERE zterm = wa_final-zterm.
+
+  SELECT SINGLE ztag1
+    FROM t052
+    INTO wa_final-zterm_days
+    WHERE zterm = wa_final-zterm.
+
+  SELECT SINGLE awkey                 "MIRO number
+    FROM bkpf
+    INTO wa_final-iblnr
+    WHERE belnr = wa_final-belnr
+    AND gjahr = wa_final-gjahr.
+
+  SELECT SINGLE budat                 "MIRO Date
+    FROM rbkp
+    INTO wa_final-idate
+    WHERE belnr = wa_final-iblnr
+    AND gjahr = wa_final-gjahr.
+
+  SELECT SINGLE lfbnr lfgja           "Mat Doc No
+    FROM rseg
+    INTO ( wa_final-mblnr, wa_final-mjahr )
+    WHERE belnr = wa_final-iblnr
+    AND gjahr = wa_final-gjahr.
+
+  SELECT SINGLE budat                 "MIGO Date
+    FROM mkpf
+    INTO wa_final-ddate
+    WHERE mblnr = wa_final-mblnr
+    AND mjahr = wa_final-mjahr.
+
+  IF wa_final-idate IS INITIAL.
+    CLEAR: wa_final-iblnr,
+           wa_final-idate,
+           wa_final-mblnr,
+           wa_final-idate.
+  ENDIF.
+
+
+**** Calculation of due date - payment term desc logic - if doc type is not UE
+  IF wa_pos-blart NE 'UE'.
+    CASE wa_final-ekorg.
+      WHEN 'BILL'.
+        wa_final-duedate = wa_final-bldat + wa_final-zterm_days.
+      WHEN 'DOC'.
+        wa_final-duedate = wa_final-accdt + wa_final-zterm_days.
+      WHEN 'MIGO'.
+        IF wa_final-ddate IS NOT INITIAL.
+          wa_final-duedate = wa_final-ddate + wa_final-zterm_days.
+        ELSE.
+          wa_final-duedate = wa_final-accdt + wa_final-zterm_days.
+        ENDIF.
+      WHEN 'MIRO'.
+        IF wa_final-idate IS NOT INITIAL.
+          wa_final-duedate = wa_final-idate + wa_final-zterm_days.
+        ELSE.
+          wa_final-duedate = wa_final-accdt + wa_final-zterm_days.
+        ENDIF.
+      WHEN OTHERS.
+        CLEAR wa_final-duedate.
+    ENDCASE.
+  ELSE.
+    wa_final-duedate = wa_final-accdt + wa_final-zterm_days.        "for doc type UE - calculation from acc posting date
+  ENDIF.
+
+**** Categorisation of within due or overdue
+  wa_final-noday = sy-datum - wa_final-duedate.
+  IF wa_final-noday LT 0.                       "Within Due
+    wa_final-admbt = wa_final-dmbtr.
+    wa_final-waers = 'W'.
+  ELSE.                                         "Overdue
+    wa_final-odmbt = wa_final-dmbtr.
+    wa_final-waers = 'O'.
+  ENDIF.
+
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*& Form balancing_credit_debit
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM balancing_credit_debit.
+
+  CLEAR: it_plus,
+         it_minus,
+         lv_sum_plus,
+         lv_sum_minus.
+
+  LOOP AT it_final INTO wa_final.
+    IF wa_final-ind EQ 'S'.
+      wa_plus-combo = wa_final-combo.
+      wa_plus-lifnr = wa_final-lifnr.
+      wa_plus-dmbtr = wa_final-dmbtr.
+      COLLECT wa_plus INTO it_plus.
+      CLEAR wa_plus.
+    ELSEIF wa_final-ind EQ 'H'.
+      wa_minus-combo = wa_final-combo.
+      wa_minus-lifnr = wa_final-lifnr.
+      wa_minus-dmbtr = wa_final-dmbtr.
+      COLLECT wa_minus INTO it_minus.
+      CLEAR wa_minus.
+    ENDIF.
+  ENDLOOP.
+
+
+  LOOP AT it_final INTO wa_final.
+    ON CHANGE OF wa_final-lifnr.
+      CLEAR: lv_sum_plus, lv_sum_minus.
+    ENDON.
+    AT NEW combo.
+      READ TABLE it_plus INTO wa_plus WITH KEY combo = wa_final-combo.
+      IF sy-subrc EQ 0.
+        lv_sum_plus = wa_plus-dmbtr.
+      ELSE.
+        lv_sum_plus = 0.
+      ENDIF.
+      READ TABLE it_minus INTO wa_minus WITH KEY combo = wa_final-combo.
+      IF sy-subrc EQ 0.
+        lv_sum_minus = wa_minus-dmbtr.
+      ELSE.
+        lv_sum_minus = 0.
+      ENDIF.
+    ENDAT.
+
+    IF lv_sum_plus < abs( lv_sum_minus ).
+
+      LOOP AT it_final INTO wa_final WHERE ind EQ 'H' AND combo EQ wa_final-combo.
+        IF lv_sum_plus >= abs( wa_final-dmbtr ).
+          lv_sum_plus += wa_final-dmbtr.
+          IF wa_final-waers EQ 'O'.
+            wa_final-dmbtr = wa_final-odmbt = 0.
+          ELSEIF wa_final-waers EQ 'W'.
+            wa_final-dmbtr = wa_final-admbt = 0.
+          ENDIF.
+        ELSE.
+          wa_final-dmbtr += lv_sum_plus.
+          IF wa_final-waers EQ 'O'.
+            wa_final-odmbt = wa_final-dmbtr.
+          ELSEIF wa_final-waers EQ 'W'.
+            wa_final-admbt = wa_final-dmbtr.
+          ENDIF.
+          lv_sum_plus = 0.
+        ENDIF.
+        MODIFY it_final FROM wa_final INDEX sy-tabix.
+      ENDLOOP.
+
+      LOOP AT it_final INTO wa_final WHERE ind EQ 'S' AND combo EQ wa_final-combo.
+        IF wa_final-waers EQ 'O'.
+          wa_final-dmbtr = wa_final-odmbt = 0.
+        ELSEIF wa_final-waers EQ 'W'.
+          wa_final-dmbtr = wa_final-admbt = 0.
+        ENDIF.
+        MODIFY it_final FROM wa_final INDEX sy-tabix.
+      ENDLOOP.
+
+
+
+    ELSEIF lv_sum_plus > abs( lv_sum_minus ).
+
+      LOOP AT it_final INTO wa_final WHERE ind EQ 'S' AND combo EQ wa_final-combo.
+        IF abs( lv_sum_minus ) >= wa_final-dmbtr.
+          lv_sum_minus += wa_final-dmbtr.
+          IF wa_final-waers EQ 'O'.
+            wa_final-dmbtr = wa_final-odmbt = 0.
+          ELSEIF wa_final-waers EQ 'W'.
+            wa_final-dmbtr = wa_final-admbt = 0.
+          ENDIF.
+        ELSE.
+          wa_final-dmbtr += lv_sum_minus.
+          IF wa_final-waers EQ 'O'.
+            wa_final-odmbt = wa_final-dmbtr.
+          ELSEIF wa_final-waers EQ 'W'.
+            wa_final-admbt = wa_final-dmbtr.
+          ENDIF.
+          lv_sum_minus = 0.
+        ENDIF.
+        MODIFY it_final FROM wa_final INDEX sy-tabix.
+      ENDLOOP.
+
+      LOOP AT it_final INTO wa_final WHERE ind EQ 'H' AND combo EQ wa_final-combo.
+        IF wa_final-waers EQ 'O'.
+          wa_final-dmbtr = wa_final-odmbt = 0.
+        ELSEIF wa_final-waers EQ 'W'.
+          wa_final-dmbtr = wa_final-admbt = 0.
+        ENDIF.
+        MODIFY it_final FROM wa_final INDEX sy-tabix.
+      ENDLOOP.
+    ENDIF.
+
+  ENDLOOP.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*& Form display_alv_invoice
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM display_alv_invoice .
+
+  ls_layout-colwidth_optimize = 'X'.
+  ls_layout-zebra = 'X'.
+
+  lw_fieldcat-fieldname = 'LIFNR'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Vendor'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'NAME1'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Name of Vendor'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'SEGMENT'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Segment'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'SAKNR'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'G/L Acc'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'ZTERM'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Payt Terms'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'BELNL'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Inv No'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'BLDAT'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Inv Date'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'IBLNR'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'MIRO No'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'IDATE'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'MIRO Date'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'DDATE'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'MIGO Date'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'BUDAT'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Doc Date'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'BELNR'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Acc Doc No'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'ACCDT'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Acc Posting Date'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'BLART'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Doc Type'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'DMBTR'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Total Amt'.
+  lw_fieldcat-do_sum = 'X'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'ADMBT'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Within Due'.
+  lw_fieldcat-do_sum = 'X'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'ODMBT'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Overdue Amt'.
+  lw_fieldcat-do_sum = 'X'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'NODAY'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Overdue Days'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'TEXT1'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Payt Term Desc'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+    EXPORTING
+      i_callback_program = sy-cprog
+*     i_callback_top_of_page = 'BUILD_HEADER'
+      is_layout          = ls_layout
+      it_fieldcat        = it_fieldcat
+    TABLES
+      t_outtab           = it_final.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*& Form modify_final_summary
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM modify_final_summary .
+
+***** Populating it_summary table by addition of total, within due & overdue amts
+  SORT it_final BY combo.
+  LOOP AT it_final INTO wa_final.
+    wa_summary = CORRESPONDING #( wa_final ).
+    lv_sum_dmbtr += wa_summary-dmbtr.
+    lv_sum_admbt += wa_summary-admbt.
+    lv_sum_odmbt += wa_summary-odmbt.
+    AT END OF combo.
+      wa_summary-dmbtr = lv_sum_dmbtr.
+      wa_summary-admbt = lv_sum_admbt.
+      wa_summary-odmbt = lv_sum_odmbt.
+      APPEND wa_summary TO it_summary.
+      CLEAR: wa_summary,
+             lv_sum_dmbtr,
+             lv_sum_admbt,
+             lv_sum_odmbt.
+    ENDAT.
+  ENDLOOP.
+  DELETE it_summary WHERE dmbtr IS INITIAL.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*& Form display_alv_summary
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM display_alv_summary .
+
+  ls_layout-colwidth_optimize = 'X'.
+  ls_layout-zebra = 'X'.
+
+  lw_fieldcat-fieldname = 'LIFNR'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Vendor Code'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'NAME1'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Vendor Name'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'SEGMENT'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Segment'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'SAKNR'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'G/L Acc'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'DMBTR'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Total Amt'.
+  lw_fieldcat-do_sum = 'X'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'ADMBT'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Within Due'.
+  lw_fieldcat-do_sum = 'X'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'ODMBT'.
+  lw_fieldcat-tabname   = 'IT_FINAL'.
+  lw_fieldcat-seltext_m = 'Overdue Amt'.
+  lw_fieldcat-do_sum = 'X'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+    EXPORTING
+      i_callback_program = sy-cprog
+*     i_callback_top_of_page = 'BUILD_HEADER'
+      is_layout          = ls_layout
+      it_fieldcat        = it_fieldcat
+    TABLES
+      t_outtab           = it_summary.
+
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*& Form modify_final_compact
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM modify_final_compact .
+
+
+***** Bifurcating into different internal tables according to number of overdue days
+  SORT it_final BY combo.
+  LOOP AT it_final INTO wa_final.
+
+    IF wa_final-odmbt IS NOT INITIAL.
+      IF wa_final-noday <= 180.
+        wa_compact_lt180 = CORRESPONDING #( wa_final ).
+        APPEND wa_compact_lt180 TO it_compact_lt180.
+        CLEAR wa_compact_lt180.
+      ELSEIF wa_final-noday > 180 AND wa_final-noday <= 365.
+        wa_compact_lt365 = CORRESPONDING #( wa_final ).
+        APPEND wa_compact_lt365 TO it_compact_lt365.
+        CLEAR wa_compact_lt365.
+      ELSEIF wa_final-noday > 365 AND wa_final-noday <= 729.
+        wa_compact_lt729 = CORRESPONDING #( wa_final ).
+        APPEND wa_compact_lt729 TO it_compact_lt729.
+        CLEAR wa_compact_lt729.
+      ELSEIF wa_final-noday > 729 AND wa_final-noday <= 1095.
+        wa_compact_lt1095 = CORRESPONDING #( wa_final ).
+        APPEND wa_compact_lt1095 TO it_compact_lt1095.
+        CLEAR wa_compact_lt1095.
+      ELSEIF wa_final-noday > 1095.
+        wa_compact_gt1095 = CORRESPONDING #( wa_final ).
+        APPEND wa_compact_gt1095 TO it_compact_gt1095.
+        CLEAR wa_compact_gt1095.
+      ENDIF.
+    ENDIF.
+
+  ENDLOOP.
+
+  CLEAR: wa_compact,
+         lv_sum_lt180,
+         lv_sum_lt365,
+         lv_sum_lt729,
+         lv_sum_lt1095,
+         lv_sum_gt1095,
+         lv_sum_dmbtr,
+         lv_sum_admbt,
+         lv_sum_odmbt.
+
+***** Total amt of <=180 overdue column
+  LOOP AT it_compact_lt180 INTO wa_compact_lt180.
+    lv_sum_lt180 += wa_compact_lt180-odmbt.
+    wa_compact_lt180_1 = CORRESPONDING #( wa_compact_lt180 ).
+    AT END OF combo.
+      wa_compact_lt180_1-lt180 = lv_sum_lt180.
+      APPEND wa_compact_lt180_1 TO it_compact_lt180_1.
+      CLEAR: lv_sum_lt180, wa_compact_lt180_1.
+    ENDAT.
+  ENDLOOP.
+
+***** Total amt of <=365 overdue column
+  LOOP AT it_compact_lt365 INTO wa_compact_lt365.
+    lv_sum_lt365 += wa_compact_lt365-odmbt.
+    wa_compact_lt365_1 = CORRESPONDING #( wa_compact_lt365 ).
+    AT END OF combo.
+      wa_compact_lt365_1-lt365 = lv_sum_lt365.
+      APPEND wa_compact_lt365_1 TO it_compact_lt365_1.
+      CLEAR: lv_sum_lt365, wa_compact_lt365_1.
+    ENDAT.
+  ENDLOOP.
+
+***** Total amt of <=729 overdue column
+  LOOP AT it_compact_lt729 INTO wa_compact_lt729.
+    lv_sum_lt729 += wa_compact_lt729-dmbtr.
+    wa_compact_lt729_1 = CORRESPONDING #( wa_compact_lt729 ).
+    AT END OF combo.
+      wa_compact_lt729_1-lt729 = lv_sum_lt729.
+      APPEND wa_compact_lt729_1 TO it_compact_lt729_1.
+      CLEAR: lv_sum_lt729, wa_compact_lt729_1.
+    ENDAT.
+  ENDLOOP.
+
+***** Total amt of <=1095 overdue column
+  LOOP AT it_compact_lt1095 INTO wa_compact_lt1095.
+    lv_sum_lt1095 += wa_compact_lt1095-dmbtr.
+    wa_compact_lt1095_1 = CORRESPONDING #( wa_compact_lt1095 ).
+    AT END OF combo.
+      wa_compact_lt1095_1-lt1095 = lv_sum_lt1095.
+      APPEND wa_compact_lt1095_1 TO it_compact_lt1095_1.
+      CLEAR: lv_sum_lt1095, wa_compact_lt1095_1.
+    ENDAT.
+  ENDLOOP.
+
+***** Total amt of >1095 overdue column
+  LOOP AT it_compact_gt1095 INTO wa_compact_gt1095.
+    lv_sum_gt1095 += wa_compact_gt1095-dmbtr.
+    wa_compact_gt1095_1 = CORRESPONDING #( wa_compact_gt1095 ).
+    AT END OF combo.
+      wa_compact_gt1095_1-gt1095 = lv_sum_gt1095.
+      APPEND wa_compact_gt1095_1 TO it_compact_gt1095_1.
+      CLEAR: lv_sum_gt1095, wa_compact_gt1095_1.
+    ENDAT.
+  ENDLOOP.
+
+  LOOP AT it_final INTO wa_final.
+    wa_compact = CORRESPONDING #( wa_final ).
+    lv_sum_dmbtr += wa_final-dmbtr.
+    lv_sum_admbt += wa_final-admbt.
+    lv_sum_odmbt += wa_final-odmbt.
+    lv_zterm = wa_final-zterm.
+    AT END OF combo.
+      wa_compact-dmbtr = lv_sum_dmbtr.
+      wa_compact-admbt = lv_sum_admbt.
+      wa_compact-odmbt = lv_sum_odmbt.
+      wa_compact-zterm = lv_zterm.
+      APPEND wa_compact TO it_compact.
+      CLEAR: lv_sum_dmbtr,
+             lv_sum_admbt,
+             lv_sum_odmbt.
+    ENDAT.
+  ENDLOOP.
+
+  LOOP AT it_compact INTO wa_compact.
+    READ TABLE it_compact_lt180_1 INTO wa_compact_lt180_1 WITH KEY combo = wa_compact-combo BINARY SEARCH.
+    IF sy-subrc = 0.
+      wa_compact-lt180 = wa_compact_lt180_1-lt180.
+      MODIFY it_compact FROM wa_compact TRANSPORTING lt180.
+    ENDIF.
+    READ TABLE it_compact_lt365_1 INTO wa_compact_lt365_1 WITH KEY combo = wa_compact-combo BINARY SEARCH.
+    IF sy-subrc = 0.
+      wa_compact-lt365 = wa_compact_lt365_1-lt365.
+      MODIFY it_compact FROM wa_compact TRANSPORTING lt365.
+    ENDIF.
+    READ TABLE it_compact_lt729_1 INTO wa_compact_lt729_1 WITH KEY combo = wa_compact-combo BINARY SEARCH.
+    IF sy-subrc = 0.
+      wa_compact-lt729 = wa_compact_lt729_1-lt729.
+      MODIFY it_compact FROM wa_compact TRANSPORTING lt729.
+    ENDIF.
+    READ TABLE it_compact_lt1095_1 INTO wa_compact_lt1095_1 WITH KEY combo = wa_compact-combo BINARY SEARCH.
+    IF sy-subrc = 0.
+      wa_compact-lt1095 = wa_compact_lt1095_1-lt1095.
+      MODIFY it_compact FROM wa_compact TRANSPORTING lt1095.
+    ENDIF.
+    READ TABLE it_compact_gt1095_1 INTO wa_compact_gt1095_1 WITH KEY combo = wa_compact-combo BINARY SEARCH.
+    IF sy-subrc = 0.
+      wa_compact-gt1095 = wa_compact_gt1095_1-gt1095.
+      MODIFY it_compact FROM wa_compact TRANSPORTING gt1095.
+    ENDIF.
+  ENDLOOP.
+
+  DELETE it_compact WHERE dmbtr IS INITIAL.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*& Form display_alv_compact
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM display_alv_compact .
+
+
+  ls_layout-colwidth_optimize = 'X'.
+  ls_layout-zebra = 'X'.
+
+  lw_fieldcat-fieldname = 'SEGMENT'.
+  lw_fieldcat-tabname   = 'IT_COMPACT'.
+  lw_fieldcat-seltext_m = 'Segment'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'LIFNR'.
+  lw_fieldcat-tabname   = 'IT_COMPACT'.
+  lw_fieldcat-seltext_m = 'Vendor Code'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'NAME1'.
+  lw_fieldcat-tabname   = 'IT_COMPACT'.
+  lw_fieldcat-seltext_m = 'Vendor Name'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'SAKNR'.
+  lw_fieldcat-tabname   = 'IT_COMPACT'.
+  lw_fieldcat-seltext_m = 'G/L Acc'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'ZTERM'.
+  lw_fieldcat-tabname   = 'IT_COMPACT'.
+  lw_fieldcat-seltext_m = 'Payt Term'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'DMBTR'.
+  lw_fieldcat-tabname   = 'IT_COMPACT'.
+  lw_fieldcat-seltext_m = 'Total Amt'.
+  lw_fieldcat-do_sum = 'X'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'ADMBT'.
+  lw_fieldcat-tabname   = 'IT_COMPACT'.
+  lw_fieldcat-seltext_m = 'Within Due'.
+  lw_fieldcat-do_sum = 'X'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'ODMBT'.
+  lw_fieldcat-tabname   = 'IT_COMPACT'.
+  lw_fieldcat-seltext_m = 'Overdue Amt'.
+  lw_fieldcat-do_sum = 'X'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'LT180'.
+  lw_fieldcat-tabname   = 'IT_COMPACT'.
+  lw_fieldcat-seltext_m = '<= 180'.
+  lw_fieldcat-do_sum = 'X'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'LT365'.
+  lw_fieldcat-tabname   = 'IT_COMPACT'.
+  lw_fieldcat-seltext_m = '<= 365'.
+  lw_fieldcat-do_sum = 'X'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'LT729'.
+  lw_fieldcat-tabname   = 'IT_COMPACT'.
+  lw_fieldcat-seltext_m = '<= 729'.
+  lw_fieldcat-do_sum = 'X'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'LT1095'.
+  lw_fieldcat-tabname   = 'IT_COMPACT'.
+  lw_fieldcat-seltext_m = '<= 1095'.
+  lw_fieldcat-do_sum = 'X'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  lw_fieldcat-fieldname = 'GT1095'.
+  lw_fieldcat-tabname   = 'IT_COMPACT'.
+  lw_fieldcat-seltext_m = '> 1095'.
+  lw_fieldcat-do_sum = 'X'.
+  APPEND lw_fieldcat TO it_fieldcat.
+  CLEAR lw_fieldcat.
+
+  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+    EXPORTING
+      i_callback_program = sy-cprog
+*     i_callback_top_of_page = 'BUILD_HEADER'
+      is_layout          = ls_layout
+      it_fieldcat        = it_fieldcat
+    TABLES
+      t_outtab           = it_compact.
+
+
+ENDFORM.
